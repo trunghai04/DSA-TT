@@ -52,6 +52,31 @@ def put_label(img_bgr: np.ndarray, text: str) -> np.ndarray:
     return out
 
 
+def put_footer(img_bgr: np.ndarray, lines: list[str]) -> np.ndarray:
+    if not lines:
+        return img_bgr
+    out = img_bgr.copy()
+    line_h = 22
+    pad = 8
+    footer_h = pad * 2 + line_h * len(lines)
+    y0 = max(0, out.shape[0] - footer_h)
+    cv2.rectangle(out, (0, y0), (out.shape[1], out.shape[0]), (0, 0, 0), thickness=-1)
+    y = y0 + pad + 16
+    for line in lines:
+        cv2.putText(
+            out,
+            line,
+            (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        y += line_h
+    return out
+
+
 def to_bgr(img: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -140,8 +165,16 @@ def main():
             raise SystemExit(f"Cannot open camera index {args.camera}")
 
     last_save_ts = 0.0
+    fps_ema: float | None = None
+    last_ts = time.time()
 
     while True:
+        now_ts = time.time()
+        dt = max(1e-6, now_ts - last_ts)
+        last_ts = now_ts
+        fps = 1.0 / dt
+        fps_ema = fps if fps_ema is None else (0.9 * fps_ema + 0.1 * fps)
+
         read_trackbar()
 
         if cap is not None:
@@ -162,13 +195,13 @@ def main():
         )
 
         info = (
-            f"th={state['thresh']}  inv={int(state['invert'])}  "
+            f"fps={fps_ema:0.1f}  th={state['thresh']}  inv={int(state['invert'])}  "
             f"kernel={state['kshape']}:{ensure_odd(state['ksize'])}  it={state['iters']}  "
             f"mode={'ALL' if state['show_all'] else state['focus']}"
         )
 
         if state["show_all"]:
-            order = ["Original", "Gray", "Binary", "Erosion", "Dilation", "Closing"]
+            order = ["Original", "Binary", "Erosion", "Dilation", "Opening", "Closing"]
             frames = [put_label(to_bgr(views[name]), name) for name in order]
             cell_w = max(240, args.width // 3)
             cell_h = int(cell_w * 0.66)
@@ -176,6 +209,13 @@ def main():
         else:
             focus = state["focus"]
             canvas = put_label(to_bgr(views[focus]), focus)
+
+        explain = []
+        if not state["show_all"] and state["focus"] == "Opening":
+            explain = ["Opening = Erosion + Dilation", "Remove small white noise, keep main shape"]
+        elif not state["show_all"] and state["focus"] == "Closing":
+            explain = ["Closing = Dilation + Erosion", "Fill small holes, connect broken parts"]
+        canvas = put_footer(canvas, explain)
 
         canvas = put_label(canvas, f"{window} | {info}")
         cv2.imshow(window, canvas)
