@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+from threading import Lock
 
 
 def _ensure_odd(n: int) -> int:
@@ -47,6 +48,39 @@ def binary_to_rgb(binary: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
 
 
+def add_salt_pepper(binary: np.ndarray, amount_pct: int, salt_vs_pepper: int) -> np.ndarray:
+    """
+    amount_pct: 0..30 (% pixels affected)
+    salt_vs_pepper: 0..100 (0=all pepper, 100=all salt)
+    """
+    amt = max(0, min(30, int(amount_pct)))
+    if amt == 0:
+        return binary
+    p = amt / 100.0
+    rnd = np.random.random(binary.shape)
+    salt_p = p * (max(0, min(100, int(salt_vs_pepper))) / 100.0)
+    pepper_p = p - salt_p
+    out = binary.copy()
+    out[rnd < pepper_p] = 0
+    out[(rnd >= pepper_p) & (rnd < pepper_p + salt_p)] = 255
+    return out
+
+
+def _label_bgr(img_bgr: np.ndarray, text: str) -> np.ndarray:
+    out = img_bgr.copy()
+    cv2.rectangle(out, (0, 0), (out.shape[1], 24), (0, 0, 0), -1)
+    cv2.putText(out, text, (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    return out
+
+
+def _grid_2x3(frames_bgr: list[np.ndarray]) -> np.ndarray:
+    h0, w0 = frames_bgr[0].shape[:2]
+    cells = [cv2.resize(f, (w0, h0), interpolation=cv2.INTER_AREA) for f in frames_bgr]
+    row1 = np.hstack(cells[0:3])
+    row2 = np.hstack(cells[3:6])
+    return np.vstack([row1, row2])
+
+
 def resize_keep_aspect(img: np.ndarray, max_w: int) -> np.ndarray:
     h, w = img.shape[:2]
     if w <= max_w:
@@ -63,9 +97,12 @@ def process_frame_bgr(
     kernel_shape: str,
     iterations: int,
     show: str,
+    noise_amount_pct: int,
+    salt_vs_pepper: int,
 ) -> np.ndarray:
     gray = to_gray(frame_bgr)
     binary = to_binary(gray, thresh=thresh, invert=invert)
+    binary = add_salt_pepper(binary, amount_pct=noise_amount_pct, salt_vs_pepper=salt_vs_pepper)
     kernel = make_kernel(kernel_size, kernel_shape)
     erosion, dilation, opening, closing = apply_morphology(binary, kernel, iterations)
 
@@ -78,6 +115,18 @@ def process_frame_bgr(
         "Opening": binary_to_rgb(opening),
         "Closing": binary_to_rgb(closing),
     }
+    if show == "Compare (2x3)":
+        # Layout: Binary | Erosion | Dilation / Opening | Closing | Original
+        bgrs = [
+            _label_bgr(cv2.cvtColor(view_map["Binary"], cv2.COLOR_RGB2BGR), "Binary"),
+            _label_bgr(cv2.cvtColor(view_map["Erosion"], cv2.COLOR_RGB2BGR), "Erosion"),
+            _label_bgr(cv2.cvtColor(view_map["Dilation"], cv2.COLOR_RGB2BGR), "Dilation"),
+            _label_bgr(cv2.cvtColor(view_map["Opening"], cv2.COLOR_RGB2BGR), "Opening (noise remove)"),
+            _label_bgr(cv2.cvtColor(view_map["Closing"], cv2.COLOR_RGB2BGR), "Closing (fill holes)"),
+            _label_bgr(cv2.cvtColor(view_map["Original"], cv2.COLOR_RGB2BGR), "Original"),
+        ]
+        grid_bgr = _grid_2x3(bgrs)
+        return cv2.cvtColor(grid_bgr, cv2.COLOR_BGR2RGB)
     return view_map.get(show, bgr_to_rgb(frame_bgr))
 
 
@@ -115,24 +164,78 @@ def render_static_demo(
 
 class MorphVideoProcessor(VideoProcessorBase):
     def __init__(self) -> None:
-        self.thresh = 127
-        self.invert = False
-        self.kernel_size = 5
-        self.kernel_shape = "Rect"
-        self.iterations = 1
-        self.show = "Closing"
+        self._lock = Lock()
+        self._params = {
+            "thresh": 127,
+            "invert": False,
+            "kernel_size": 5,
+            "kernel_shape": "Rect",
+            "iterations": 1,
+            "show": "Closing",
+            "overlay": True,
+            "noise_amount_pct": 0,
+            "salt_vs_pepper": 50,
+        }
+
+    def set_params(
+        self,
+        *,
+        thresh: int,
+        invert: bool,
+        kernel_size: int,
+        kernel_shape: str,
+        iterations: int,
+        show: str,
+        overlay: bool,
+        noise_amount_pct: int,
+        salt_vs_pepper: int,
+    ) -> None:
+        with self._lock:
+            self._params = {
+                "thresh": int(thresh),
+                "invert": bool(invert),
+                "kernel_size": int(kernel_size),
+                "kernel_shape": str(kernel_shape),
+                "iterations": int(iterations),
+                "show": str(show),
+                "overlay": bool(overlay),
+                "noise_amount_pct": int(noise_amount_pct),
+                "salt_vs_pepper": int(salt_vs_pepper),
+            }
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
+        with self._lock:
+            p = dict(self._params)
         out_rgb = process_frame_bgr(
             img_bgr,
-            thresh=self.thresh,
-            invert=self.invert,
-            kernel_size=self.kernel_size,
-            kernel_shape=self.kernel_shape,
-            iterations=self.iterations,
-            show=self.show,
+            thresh=p["thresh"],
+            invert=p["invert"],
+            kernel_size=p["kernel_size"],
+            kernel_shape=p["kernel_shape"],
+            iterations=p["iterations"],
+            show=p["show"],
+            noise_amount_pct=p.get("noise_amount_pct", 0),
+            salt_vs_pepper=p.get("salt_vs_pepper", 50),
         )
+        if p.get("overlay", True):
+            out_bgr_tmp = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+            text = (
+                f"{p['show']} | th={p['thresh']} inv={int(p['invert'])} "
+                f"k={p['kernel_shape']}:{_ensure_odd(p['kernel_size'])} it={p['iterations']}"
+            )
+            cv2.rectangle(out_bgr_tmp, (0, 0), (out_bgr_tmp.shape[1], 28), (0, 0, 0), -1)
+            cv2.putText(
+                out_bgr_tmp,
+                text,
+                (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            out_rgb = cv2.cvtColor(out_bgr_tmp, cv2.COLOR_BGR2RGB)
         out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
         return av.VideoFrame.from_ndarray(out_bgr, format="bgr24")
 
@@ -175,9 +278,12 @@ with tab_camera:
     st.write("Bật webcam để xem xử lý theo thời gian thực (realtime).")
     show = st.selectbox(
         "Xem khung nào?",
-        ["Original", "Gray", "Binary", "Erosion", "Dilation", "Opening", "Closing"],
-        index=6,
+        ["Compare (2x3)", "Original", "Gray", "Binary", "Erosion", "Dilation", "Opening", "Closing"],
+        index=0,
     )
+    overlay = st.toggle("Overlay thông số lên video", value=True)
+    noise_amount_pct = st.slider("Add noise vào ảnh nhị phân (%)", 0, 20, 8, 1)
+    salt_vs_pepper = st.slider("Salt vs Pepper (0=pepper, 100=salt)", 0, 100, 50, 5)
 
     ctx = webrtc_streamer(
         key="morph-demo",
@@ -188,10 +294,15 @@ with tab_camera:
     )
 
     if ctx.video_processor:
-        ctx.video_processor.thresh = thresh
-        ctx.video_processor.invert = invert
-        ctx.video_processor.kernel_size = kernel_size
-        ctx.video_processor.kernel_shape = kernel_shape
-        ctx.video_processor.iterations = iterations
-        ctx.video_processor.show = show
+        ctx.video_processor.set_params(
+            thresh=thresh,
+            invert=invert,
+            kernel_size=kernel_size,
+            kernel_shape=kernel_shape,
+            iterations=iterations,
+            show=show,
+            overlay=overlay,
+            noise_amount_pct=noise_amount_pct,
+            salt_vs_pepper=salt_vs_pepper,
+        )
 
