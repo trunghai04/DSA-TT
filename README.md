@@ -15,6 +15,29 @@ pip install -r requirements.txt
 
 ## Chạy chương trình
 
+### UI OpenCV (nhanh, chạy trực tiếp Python)
+
+- Camera realtime:
+
+```bash
+python opencv_ui.py
+```
+
+- Ảnh (upload bằng đường dẫn):
+
+```bash
+python opencv_ui.py --image "path\to\image.jpg"
+```
+
+Phím tắt:
+
+- `a`: xem mosaic nhiều khung
+- `1/2/3/4`: focus Erosion/Dilation/Opening/Closing
+- `i`: invert threshold
+- `r/e/c`: kernel shape Rect/Ellipse/Cross
+- `s`: lưu ảnh vào thư mục `outputs/`
+- `q` hoặc `Esc`: thoát
+
 ### Cách nhanh (khuyên dùng)
 
 - Windows PowerShell:
