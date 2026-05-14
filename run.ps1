@@ -31,8 +31,6 @@ python -m pip install --upgrade pip
 Write-Host "Installing dependencies (this may take a while)..." -ForegroundColor Yellow
 python -m pip install -r requirements.txt
 
-Write-Host "Starting Streamlit..." -ForegroundColor Green
-Write-Host "Open: http://localhost:8501" -ForegroundColor Green
-
-streamlit run app.py --server.port 8501
+Write-Host "Starting desktop app..." -ForegroundColor Green
+python app.py
 
